@@ -1,11 +1,10 @@
 # Header variables and parameters.
 import sys
-import pymesh
 import os
 import numpy as np
-from IPython.core.debugger import set_trace
 import importlib
 
+from plyfile import PlyData
 from scipy.spatial import cKDTree
 
 from default_config.masif_opts import masif_opts
@@ -96,8 +95,10 @@ for count, ppi_pair_id in enumerate(os.listdir(parent_in_dir)):
     l = l[:K] 
     l = pos_labels[l]
 
-    v1 = pymesh.load_mesh(ply_fn1).vertices[l]
-    v2 = pymesh.load_mesh(ply_fn2).vertices
+    plydata1 = PlyData.read(ply_fn1)
+    v1 = np.column_stack([plydata1['vertex']['x'], plydata1['vertex']['y'], plydata1['vertex']['z']])[l]
+    plydata2 = PlyData.read(ply_fn2)
+    v2 = np.column_stack([plydata2['vertex']['x'], plydata2['vertex']['y'], plydata2['vertex']['z']])
 
     # For each point in v1, find the closest point in v2.
     kdt = cKDTree(v2)
@@ -106,16 +107,18 @@ for count, ppi_pair_id in enumerate(os.listdir(parent_in_dir)):
     contact_points = np.where(d < params['pos_interface_cutoff'])[0]
     try:
         k1 = l[contact_points]
-    except:
-        set_trace()
+    except Exception as e:
+        print(f"Error computing contact points for {ppi_pair_id}: {e}")
+        continue
     k2 = r[contact_points]
 
     # For negatives, get points in v2 far from p1.
     try:
         kdt = cKDTree(v1)
         dneg, rneg = kdt.query(v2)
-    except:
-        set_trace()
+    except Exception as e:
+        print(f"Error computing KDTree for {ppi_pair_id}: {e}")
+        continue
     k_neg2 = np.where(dneg > params['pos_interface_cutoff'])[0]
 
 

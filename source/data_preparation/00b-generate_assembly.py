@@ -16,7 +16,7 @@ def assemble(pdb_id):
     )
     try:
         struct_assembly = struct.apply_biomolecule_matrices()[0]
-    except:
+    except Exception:
         return 0
     struct_assembly.write(
         os.path.join(masif_opts["ligand"]["assembly_dir"], "{}.pdb".format(pdb_id))

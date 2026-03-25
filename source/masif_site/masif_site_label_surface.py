@@ -1,130 +1,112 @@
-import pymesh
+"""
+masif_site_label_surface.py: Colour a protein PLY surface by the MaSIF-site
+interface score and optionally compute ROC AUC against ground truth.
+"""
+
 import os
 import sys
-from IPython.core.debugger import set_trace
-from sklearn.metrics import roc_auc_score
 import importlib
 import numpy as np
+from sklearn.metrics import roc_auc_score
+from plyfile import PlyData, PlyElement
 from default_config.masif_opts import masif_opts
 
-"""
-masif_site_label_surface.py: Color a protein ply surface file by the MaSIF-site interface score.
-Pablo Gainza - LPDI STI EPFL 2019
-This file is part of MaSIF.
-Released under an Apache License 2.0
-"""
-
-
 params = masif_opts["site"]
-custom_params_file = sys.argv[1]
-custom_params = importlib.import_module(custom_params_file, package=None)
-custom_params = custom_params.custom_params
+custom_params = importlib.import_module(sys.argv[1]).custom_params
+for key, val in custom_params.items():
+    print(f"Setting {key} to {val}")
+    params[key] = val
 
-for key in custom_params:
-    print("Setting {} to {} ".format(key, custom_params[key]))
-    params[key] = custom_params[key]
-
-# Shape precomputation dir.
 parent_in_dir = params["masif_precomputation_dir"]
 eval_list = []
 
-all_roc_auc_scores = []
-
 if len(sys.argv) == 3:
-    # eval_list = [sys.argv[2].rstrip('_')]
     ppi_pair_ids = [sys.argv[2]]
-# Read a list of pdb_chain entries to evaluate.
 elif len(sys.argv) == 4 and sys.argv[2] == "-l":
-    listfile = open(sys.argv[3])
-    ppi_pair_ids = []
-    for line in listfile:
-        eval_list.append(line.rstrip())
-    for mydir in os.listdir(parent_in_dir):
-        ppi_pair_ids.append(mydir)
+    eval_list = [line.rstrip() for line in open(sys.argv[3])]
+    ppi_pair_ids = os.listdir(parent_in_dir)
 else:
     print("Not enough parameters")
     sys.exit(1)
 
+os.makedirs(params["out_surf_dir"], exist_ok=True)
+all_roc_auc = []
+
 for ppi_pair_id in ppi_pair_ids:
     fields = ppi_pair_id.split("_")
-    pdbid = fields[0]
-    if len(fields) == 2 or fields[2] == '':
-        chains = [ppi_pair_id.split("_")[1]]
-    else:
-        chains = [ppi_pair_id.split("_")[1], ppi_pair_id.split("_")[2]]
-
-    if len(chains) == 1:
-        pids = ['p1']
-    else: 
-        pids = ['p1', 'p2']
+    pdbid  = fields[0]
+    chains = [fields[1]]
+    if len(fields) == 3 and fields[2]:
+        chains.append(fields[2])
+    pids = ["p1"] if len(chains) == 1 else ["p1", "p2"]
 
     for ix, pid in enumerate(pids):
-        ply_file = masif_opts["ply_file_template"].format(pdbid, chains[ix])
         pdb_chain_id = pdbid + "_" + chains[ix]
-
-        if (
-            pdb_chain_id not in eval_list
-            and pdb_chain_id + "_" not in eval_list
-            and len(eval_list) > 0
-        ):
+        if eval_list and pdb_chain_id not in eval_list and pdb_chain_id + "_" not in eval_list:
             continue
 
+        ply_file = masif_opts["ply_file_template"].format(pdbid, chains[ix])
         try:
-            p1 = pymesh.load_mesh(ply_file)
-        except:
-            print("File does not exist: {}".format(ply_file))
-            continue
-        try:
-            scores = np.load(
-                params["out_pred_dir"] + "/pred_" + pdbid + "_" + chains[ix] + ".npy"
-            )
-        except:
-            print(
-                "File does not exist: {}".format(
-                    params["out_pred_dir"]
-                    + "/pred_"
-                    + pdbid
-                    + "_"
-                    + chains[ix]
-                    + ".npy"
-                )
-            )
+            plydata = PlyData.read(ply_file)
+        except Exception:
+            print(f"File does not exist: {ply_file}")
             continue
 
-
-        mymesh = p1
-
-        ground_truth = mymesh.get_attribute('vertex_iface')
-        # Compute ROC AUC for this protein. 
+        pred_file = os.path.join(params["out_pred_dir"], f"pred_{pdbid}_{chains[ix]}.npy")
         try:
-            roc_auc = roc_auc_score(ground_truth, scores[0])
-            all_roc_auc_scores.append(roc_auc)
-            print("ROC AUC score for protein {} : {:.2f} ".format(pdbid+'_'+chains[ix], roc_auc))
-        except: 
-            print("No ROC AUC computed for protein (possibly, no ground truth defined in input)") 
+            scores = np.load(pred_file)
+        except Exception:
+            print(f"Prediction not found: {pred_file}")
+            continue
 
-        mymesh.remove_attribute("vertex_iface")
-        mymesh.add_attribute("iface")
-        mymesh.set_attribute("iface", scores[0])
-        mymesh.remove_attribute("vertex_x")
-        mymesh.remove_attribute("vertex_y")
-        mymesh.remove_attribute("vertex_z")
-        mymesh.remove_attribute("face_vertex_indices")
+        v = plydata["vertex"]
+        prop_names = {p.name for p in v.properties}
 
-        if not os.path.exists(params["out_surf_dir"]):
-            os.makedirs(params["out_surf_dir"])
+        if "vertex_iface" in prop_names:
+            ground_truth = np.array(v["vertex_iface"], dtype=np.float64)
+            try:
+                roc = roc_auc_score(ground_truth, scores)
+                all_roc_auc.append(roc)
+                print(f"ROC AUC for {pdb_chain_id}: {roc:.2f}")
+            except Exception:
+                print("No ROC AUC (possibly no ground truth).")
 
-        pymesh.save_mesh(
-            params["out_surf_dir"] + pdb_chain_id + ".ply",
-            mymesh,
-            *mymesh.get_attribute_names(),
-            use_float=True,
-            ascii=True
+        # Re-save the PLY with the prediction score replacing vertex_iface
+        n = len(v)
+        verts = np.stack([
+            np.array(v["x"], dtype=np.float32),
+            np.array(v["y"], dtype=np.float32),
+            np.array(v["z"], dtype=np.float32),
+        ], axis=1)
+
+        dtype = [("x","f4"),("y","f4"),("z","f4")]
+        cols  = [verts[:,0], verts[:,1], verts[:,2]]
+
+        for attr in ["vertex_nx","vertex_ny","vertex_nz",
+                     "vertex_charge","vertex_hbond","vertex_hphob","vertex_cb"]:
+            if attr in prop_names:
+                dtype.append((attr, "f4"))
+                cols.append(np.array(v[attr], dtype=np.float32))
+
+        # Add prediction score
+        dtype.append(("vertex_iface", "f4"))
+        cols.append(scores.astype(np.float32))
+
+        vertex_data = np.array(list(zip(*cols)), dtype=dtype)
+        vertex_el   = PlyElement.describe(vertex_data, "vertex")
+
+        face_data = plydata["face"]["vertex_indices"]
+        faces = np.vstack([np.asarray(f, dtype=np.int32) for f in face_data])
+        face_records = np.array(
+            [([int(f[0]), int(f[1]), int(f[2])],) for f in faces],
+            dtype=[("vertex_indices", "O")],
         )
-        print("Successfully saved file " + params["out_surf_dir"] + pdb_chain_id + ".ply")
+        face_el = PlyElement.describe(face_records, "face")
 
-med_roc = np.median(all_roc_auc_scores)
+        out_path = os.path.join(params["out_surf_dir"], pdb_chain_id + ".ply")
+        PlyData([vertex_el, face_el], text=True).write(out_path)
+        print(f"Saved: {out_path}")
 
-if len(all_roc_auc_scores) > 0:
-    print("Computed the ROC AUC for {} proteins".format(len(all_roc_auc_scores)))
-    print("Median ROC AUC score: {}".format(med_roc))
+if all_roc_auc:
+    print(f"Computed ROC AUC for {len(all_roc_auc)} proteins")
+    print(f"Median ROC AUC: {np.median(all_roc_auc):.4f}")

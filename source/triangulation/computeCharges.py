@@ -80,7 +80,7 @@ def computeChargeHelper(atom_name, res, v):
         b = acceptor_atom.get_coord()
         try:
             a = res[acceptorAngleAtom[atom_name]].get_coord()
-        except:
+        except KeyError:
             return 0.0
         # 120 degress for acceptor
         angle_deviation = computeAngleDeviation(a, b, v, 2 * np.pi / 3)
@@ -91,7 +91,7 @@ def computeChargeHelper(atom_name, res, v):
         if atom_name in acceptorPlaneAtom:
             try:
                 d = res[acceptorPlaneAtom[atom_name]].get_coord()
-            except:
+            except KeyError:
                 return 0.0
             plane_deviation = computePlaneDeviation(d, a, b, v)
             plane_penalty = computeAnglePenalty(plane_deviation)

@@ -1,10 +1,9 @@
 # Header variables and parameters.
-import pymesh
 import sys
 import os
 import time
 import numpy as np
-from IPython.core.debugger import set_trace
+import torch
 from sklearn import metrics
 import importlib
 from default_config.masif_opts import masif_opts
@@ -41,6 +40,7 @@ np.random.seed(0)
 print("Reading pre-trained network")
 from masif_modules.MaSIF_ppi_search import MaSIF_ppi_search
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 learning_obj = MaSIF_ppi_search(
     params["max_distance"],
     n_thetas=16,
@@ -49,7 +49,11 @@ learning_obj = MaSIF_ppi_search(
     idx_gpu="/gpu:0",
     feat_mask=params["feat_mask"],
 )
-learning_obj.saver.restore(learning_obj.session, params["model_dir"] + "model")
+learning_obj.load_state_dict(
+    torch.load(os.path.join(params["model_dir"], "model.pt"), map_location=device, weights_only=True)
+)
+learning_obj.to(device)
+learning_obj.eval()
 
 from masif_modules.train_ppi_search import compute_val_test_desc
 
@@ -106,7 +110,7 @@ for count, ppi_pair_id in enumerate(ppi_list):
             labels = np.load(in_dir + "p1" + "_sc_labels.npy")
             mylabels = labels[0]
             labels = np.median(mylabels, axis=1)
-        except:# Exception, e:
+        except Exception as e:
             print('Could not open '+in_dir+'p1'+'_sc_labels.npy: '+str(e))
             continue
         print("Number of vertices: {}".format(len(labels)))
@@ -122,12 +126,15 @@ for count, ppi_pair_id in enumerate(ppi_list):
 
 
     if len(l) > 0 and chain2 != "":
-        ply_fn1 = masif_opts['ply_file_template'].format(pdbid, chain1)
-        v1 = pymesh.load_mesh(ply_fn1).vertices[l]
+        from plyfile import PlyData
         from sklearn.neighbors import NearestNeighbors
+        ply_fn1 = masif_opts['ply_file_template'].format(pdbid, chain1)
+        plydata1 = PlyData.read(ply_fn1)
+        v1 = np.column_stack([plydata1['vertex']['x'], plydata1['vertex']['y'], plydata1['vertex']['z']])[l]
 
-        ply_fn2 = masif_opts['ply_file_template'].format(pdbid, chain2 )
-        v2 = pymesh.load_mesh(ply_fn2).vertices
+        ply_fn2 = masif_opts['ply_file_template'].format(pdbid, chain2)
+        plydata2 = PlyData.read(ply_fn2)
+        v2 = np.column_stack([plydata2['vertex']['x'], plydata2['vertex']['y'], plydata2['vertex']['z']])
 
         # For each point in v1, find the closest point in v2.
         nbrs = NearestNeighbors(n_neighbors=1, algorithm="ball_tree").fit(v2)
@@ -148,7 +155,7 @@ for count, ppi_pair_id in enumerate(ppi_list):
     pid = "p1"
     try:
         p1_rho_wrt_center = np.load(in_dir + pid + "_rho_wrt_center.npy")
-    except:
+    except (FileNotFoundError, IOError):
         continue
     p1_theta_wrt_center = np.load(in_dir + pid + "_theta_wrt_center.npy")
     p1_input_feat = np.load(in_dir + pid + "_input_feat.npy")

@@ -20,7 +20,7 @@ try:
     structure = PDB(
         os.path.join(masif_opts["ligand"]["assembly_dir"], "{}.pdb".format(pdb_id))
     )
-except:
+except Exception:
     print("Problem with opening structure", pdb)
 for chain in structure.chains:
     for het in chain.heteroatoms:

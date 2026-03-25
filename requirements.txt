@@ -1,12 +1,31 @@
-Python
-PyMesh
-reduce
-MSMS
-biopython
-pdb2pqr
-multivalue
-APBS
-open3D
-Pymol
-Tensorflow
-colour
+# Core deep learning
+torch>=2.5
+
+# Mesh I/O and regularization (replaces PyMesh)
+plyfile>=1.0
+trimesh>=4.4
+pymeshlab>=2024.0
+
+# Curvature computation (strongly recommended; falls back to trimesh if absent)
+# pip install libigl
+libigl>=2.5
+
+# Graph / geodesic distances
+networkx>=3.3
+scipy>=1.13
+
+# Features and data
+numpy>=1.26,<2.0
+biopython>=1.83
+scikit-learn>=1.4
+matplotlib>=3.8
+
+# 3D alignment (MaSIF-search second stage)
+open3d>=0.19
+packaging>=24.0
+
+# External binaries (not pip-installable; see docs)
+# reduce v3.23   -- protonation: http://kinemage.biochem.duke.edu/
+# MSMS v2.6.1   -- molecular surface: https://ccsb.scripps.edu/msms/
+# APBS >= 3.0   -- electrostatics: https://apbs.readthedocs.io/
+# pdb2pqr >= 3.0 -- PDB→PQR: https://pdb2pqr.readthedocs.io/

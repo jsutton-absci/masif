@@ -59,8 +59,8 @@ class Simple_mesh:
         for i in range(face_line_start, face_line_start + self.num_faces):
             try:
                 fields = lines[i].split(" ")
-            except:
-                ipdb.set_trace()
+            except Exception as e:
+                raise ValueError(f"Failed to parse face line {i}: {e}")
             face = [int(x) for x in fields[1:]]
             self.faces.append(face)
         self.faces = np.array(self.faces)

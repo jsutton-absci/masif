@@ -1,82 +1,113 @@
-import tensorflow as tf
-import numpy.matlib 
 import os
 import numpy as np
-from IPython.core.debugger import set_trace
-from scipy.spatial import cKDTree
-from sklearn.metrics import roc_auc_score
-from tensorflow import keras
-import time
-#import pandas as pd
-import pickle
-import sys
+import torch
+import torch.nn as nn
 
 """
-score_nn.py: Class to score protein complex alignments based on a pre-trained neural network (used for MaSIF-search's second stage protocol).
+score_nn.py: Class to score protein complex alignments based on a pre-trained
+neural network (used for MaSIF-search's second stage protocol).
 Freyr Sverrisson and Pablo Gainza - LPDI STI EPFL 2019
 Released under an Apache License 2.0
 """
 
-class ScoreNN:
+
+class ScoreNN(nn.Module):
+    """1D conv network for scoring surface patch alignments.
+
+    Architecture mirrors the original Keras model:
+    6x Conv1D(kernels 3→8→16→32→64→128→256, kernel_size=1) with BN + ReLU,
+    GlobalAveragePooling, then 6x Dense layers down to 2 outputs (softmax).
+
+    Input:  (batch, seq_len, 3)  — 3 geometric features per surface point.
+    Output: (batch, 2)           — [negative_prob, positive_prob].
+    """
 
     def __init__(self):
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        session = tf.Session(config=config)
-
-        np.random.seed(42)
-        tf.random.set_random_seed(42)
-
-        reg = keras.regularizers.l2(l=0.0)
-        model = keras.models.Sequential()
-
-        model.add(keras.layers.Conv1D(filters=8,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=16,kernel_size=1,strides=1, input_shape=(200,3)))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=32,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=64,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=128,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=256,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.GlobalAveragePooling1D())
-        model.add(keras.layers.Dense(128,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(64,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(32,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(16,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(8,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(4,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(2, activation='softmax'))
-
-        opt = keras.optimizers.Adam(lr=1e-4)
-        model.compile(optimizer=opt,loss='sparse_categorical_crossentropy',metrics=['accuracy'])
-
-        self.model = model
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(3, 8, kernel_size=1),
+            nn.BatchNorm1d(8),
+            nn.ReLU(),
+            nn.Conv1d(8, 16, kernel_size=1),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.Conv1d(16, 32, kernel_size=1),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, kernel_size=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Conv1d(128, 256, kernel_size=1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 4),
+            nn.ReLU(),
+            nn.Linear(4, 2),
+        )
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(self._device)
         self.restore_model()
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, 3) → (batch, 3, seq_len) for Conv1d
+        x = x.transpose(1, 2)
+        x = self.conv(x)
+        x = x.mean(dim=2)  # GlobalAveragePooling1D
+        return torch.softmax(self.fc(x), dim=1)
+
     def restore_model(self):
-        self.model.load_weights('models/nn_score/trained_model.hdf5')
+        model_path = os.path.join(os.path.dirname(__file__), 'models', 'nn_score', 'trained_model.pt')
+        if os.path.exists(model_path):
+            self.load_state_dict(torch.load(model_path, map_location=self._device, weights_only=True))
+        else:
+            print(f'Warning: ScoreNN weights not found at {model_path}. '
+                  'Running with random weights.')
 
-    def train_model(self, features, labels, n_negatives, n_positives):
-        callbacks = [
-            keras.callbacks.ModelCheckpoint(filepath='models/nn_score/{}.hdf5'.format('trained_model'),save_best_only=True,monitor='val_loss',save_weights_only=True),\
-            keras.callbacks.TensorBoard(log_dir='./logs/nn_score',write_graph=False,write_images=True)\
-        ]
-        history = self.model.fit(features,labels,batch_size=32,epochs=50,validation_split=0.1,shuffle=True, class_weight={0:1.0/n_negatives,1:1.0/n_positives}, callbacks=callbacks)
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        """Run inference on a batch of patch feature arrays.
 
+        Args:
+            features: numpy array of shape (batch, seq_len, 3).
+        Returns:
+            numpy array of shape (batch, 2) — softmax [neg, pos] probabilities.
+        """
+        self.eval()
+        with torch.no_grad():
+            x = torch.tensor(features, dtype=torch.float32).to(self._device)
+            return self.forward(x).cpu().numpy()
 
-    def eval(self, features):
-        #set_trace()
-        y_test_pred = self.model.predict(features)
-        return y_test_pred
-
-
+    def train_model(self, features: np.ndarray, labels: np.ndarray,
+                    n_negatives: int, n_positives: int):
+        """Fine-tune the model on provided features / labels."""
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        loss_fn = nn.CrossEntropyLoss(
+            weight=torch.tensor(
+                [1.0 / n_negatives, 1.0 / n_positives], dtype=torch.float32
+            ).to(self._device)
+        )
+        self.train()
+        x = torch.tensor(features, dtype=torch.float32).to(self._device)
+        y = torch.tensor(labels.ravel(), dtype=torch.long).to(self._device)
+        for epoch in range(50):
+            optimizer.zero_grad()
+            loss = loss_fn(self.forward(x), y)
+            loss.backward()
+            optimizer.step()
+        save_dir = os.path.join(os.path.dirname(__file__), 'models', 'nn_score')
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(self.state_dict(), os.path.join(save_dir, 'trained_model.pt'))

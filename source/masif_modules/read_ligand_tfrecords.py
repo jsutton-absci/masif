@@ -1,44 +1,49 @@
-import tensorflow as tf
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+"""
+read_ligand_tfrecords.py: PyTorch Dataset for MaSIF-ligand training data.
+Replaces the original TensorFlow TFRecords pipeline.
+
+Each sample is one protein; data are loaded from .npy files in the
+masif precomputation directory. pocket_labels.npy must be pre-computed
+by 04b-make_ligand_dataset.py.
+
+Pablo Gainza / Freyr Sverrisson - LPDI STI EPFL 2019 (PyTorch port 2024)
+Released under an Apache License 2.0
+"""
 
 
-def _parse_function(example_proto):
-    keys_to_features = {
-        "input_feat_shape": tf.FixedLenFeature([3], dtype=tf.int64),
-        "input_feat": tf.VarLenFeature(dtype=tf.float32),
-        "rho_wrt_center_shape": tf.FixedLenFeature([2], dtype=tf.int64),
-        "rho_wrt_center": tf.VarLenFeature(dtype=tf.float32),
-        "theta_wrt_center_shape": tf.FixedLenFeature([2], dtype=tf.int64),
-        "theta_wrt_center": tf.VarLenFeature(dtype=tf.float32),
-        "mask_shape": tf.FixedLenFeature([3], dtype=tf.int64),
-        "mask": tf.VarLenFeature(dtype=tf.float32),
-        "pdb": tf.FixedLenFeature([], dtype=tf.string),
-        "pocket_labels_shape": tf.FixedLenFeature([2], dtype=tf.int64),
-        "pocket_labels": tf.VarLenFeature(dtype=tf.int64),
-    }
-    parsed_features = tf.parse_single_example(example_proto, keys_to_features)
-    input_feat = tf.sparse_tensor_to_dense(parsed_features["input_feat"])
-    input_feat = tf.reshape(
-        input_feat, tf.cast(parsed_features["input_feat_shape"], tf.int32)
-    )
-    rho_wrt_center = tf.sparse_tensor_to_dense(parsed_features["rho_wrt_center"])
-    rho_wrt_center = tf.reshape(
-        rho_wrt_center, tf.cast(parsed_features["rho_wrt_center_shape"], tf.int32)
-    )
-    theta_wrt_center = tf.sparse_tensor_to_dense(parsed_features["theta_wrt_center"])
-    theta_wrt_center = tf.reshape(
-        theta_wrt_center, tf.cast(parsed_features["theta_wrt_center_shape"], tf.int32)
-    )
-    mask = tf.sparse_tensor_to_dense(parsed_features["mask"])
-    mask = tf.reshape(mask, tf.cast(parsed_features["mask_shape"], tf.int32))
-    labels = tf.sparse_tensor_to_dense(parsed_features["pocket_labels"])
-    labels = tf.reshape(
-        labels, tf.cast(parsed_features["pocket_labels_shape"], tf.int32)
-    )
-    return (
-        input_feat,
-        rho_wrt_center,
-        theta_wrt_center,
-        mask,
-        labels,
-        parsed_features["pdb"],
-    )
+class LigandDataset(Dataset):
+    """Dataset of precomputed MaSIF-ligand surface patches.
+
+    Args:
+        pdb_list:    list of PDB IDs (strings) to include.
+        precom_dir:  path to the masif precomputation directory, where each
+                     protein has a subdirectory ``<pdb>_/`` containing:
+                     p1_input_feat.npy, p1_rho_wrt_center.npy,
+                     p1_theta_wrt_center.npy, p1_mask.npy,
+                     p1_pocket_labels.npy.
+    """
+
+    def __init__(self, pdb_list, precom_dir):
+        self.pdbs = []
+        for pdb in pdb_list:
+            d = os.path.join(precom_dir, pdb + "_")
+            if os.path.exists(os.path.join(d, "p1_pocket_labels.npy")):
+                self.pdbs.append((pdb, d))
+        self.precom_dir = precom_dir
+
+    def __len__(self):
+        return len(self.pdbs)
+
+    def __getitem__(self, idx):
+        pdb, d = self.pdbs[idx]
+        input_feat = np.load(os.path.join(d, "p1_input_feat.npy"))
+        rho = np.load(os.path.join(d, "p1_rho_wrt_center.npy"))
+        theta = np.load(os.path.join(d, "p1_theta_wrt_center.npy"))
+        mask = np.expand_dims(np.load(os.path.join(d, "p1_mask.npy")), -1)
+        pocket_labels = np.load(os.path.join(d, "p1_pocket_labels.npy"))
+        return input_feat, rho, theta, mask, pocket_labels, pdb

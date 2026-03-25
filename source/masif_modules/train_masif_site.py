@@ -1,329 +1,311 @@
-import time
-import os
-from sklearn import metrics
-import numpy as np
-from IPython.core.debugger import set_trace
-from sklearn.metrics import accuracy_score, roc_auc_score
+"""
+train_masif_site.py: Training and inference functions for MaSIF-site.
 
-# Apply mask to input_feat
+Ported from the TensorFlow 1.x implementation to PyTorch.
+"""
+
+import os
+import time
+import numpy as np
+import torch
+import torch.optim as optim
+from sklearn import metrics
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def mask_input_feat(input_feat, mask):
+    """Remove feature channels disabled by feat_mask."""
     mymask = np.where(np.array(mask) == 0.0)[0]
     return np.delete(input_feat, mymask, axis=2)
 
 
 def pad_indices(indices, max_verts):
-    padded_ix = np.zeros((len(indices), max_verts), dtype=int)
-    for patch_ix in range(len(indices)):
-        padded_ix[patch_ix] = np.concatenate(
-            [indices[patch_ix], [patch_ix] * (max_verts - len(indices[patch_ix]))]
-        )
-    return padded_ix
+    """Pad neighbour index lists to a uniform length.
+
+    Indices shorter than max_verts are padded with the centre-vertex index
+    (i.e. they self-loop) so the shape is [n_verts, max_verts].
+    """
+    padded = np.zeros((len(indices), max_verts), dtype=int)
+    for k, idx in enumerate(indices):
+        l = len(idx)
+        padded[k, :l] = idx
+        padded[k, l:] = k   # pad with self-index (maps to centre vertex)
+    return padded
 
 
-# Run masif site on a protein, on a previously trained network.
-def run_masif_site(
-    params, learning_obj, rho_wrt_center, theta_wrt_center, input_feat, mask, indices
-):
+def _to_tensor(arr, device, dtype=torch.float32):
+    return torch.tensor(arr, dtype=dtype, device=device)
+
+
+# ---------------------------------------------------------------------------
+# Inference (used at prediction time)
+# ---------------------------------------------------------------------------
+
+def run_masif_site(params, model, rho_wrt_center, theta_wrt_center,
+                   input_feat, mask, indices, device=None):
+    """Run MaSIF-site inference on one protein.
+
+    Args:
+        params:           masif_opts['site'] dict.
+        model:            MaSIF_site instance (already loaded).
+        rho_wrt_center:   [N, max_shape_size] numpy array.
+        theta_wrt_center: [N, max_shape_size] numpy array.
+        input_feat:       [N, max_shape_size, n_feat] numpy array.
+        mask:             [N, max_shape_size] numpy array.
+        indices:          list of N variable-length neighbour-index lists.
+        device:           torch.device (auto-detected if None).
+
+    Returns:
+        scores: [N] numpy array of interface probabilities.
+    """
+    if device is None:
+        device = next(model.parameters()).device
+
     indices = pad_indices(indices, mask.shape[1])
-    mask = np.expand_dims(mask, 2)
-    feed_dict = {
-        learning_obj.rho_coords: rho_wrt_center,
-        learning_obj.theta_coords: theta_wrt_center,
-        learning_obj.input_feat: input_feat,
-        learning_obj.mask: mask,
-        learning_obj.indices_tensor: indices,
-    }
+    mask_3d = mask[:, :, np.newaxis]
 
-    score = learning_obj.session.run([learning_obj.full_score], feed_dict=feed_dict)
-    return score
+    with torch.no_grad():
+        rho_t   = _to_tensor(rho_wrt_center[:, :, np.newaxis], device)
+        theta_t = _to_tensor(theta_wrt_center[:, :, np.newaxis], device)
+        feat_t  = _to_tensor(input_feat, device)
+        mask_t  = _to_tensor(mask_3d, device)
+        idx_t   = _to_tensor(indices, device, dtype=torch.long)
+
+        model.eval()
+        logits = model(feat_t, rho_t, theta_t, mask_t, idx_t)
+        scores = torch.sigmoid(logits)[:, 0].cpu().numpy()
+
+    return scores
 
 
-def compute_roc_auc(pos, neg):
-    labels = np.concatenate([np.ones((len(pos))), np.zeros((len(neg)))])
-    dist_pairs = np.concatenate([pos, neg])
-    return metrics.roc_auc_score(labels, dist_pairs)
-
+# ---------------------------------------------------------------------------
+# Training loop
+# ---------------------------------------------------------------------------
 
 def train_masif_site(
-    learning_obj,
+    model,
     params,
     batch_size=100,
     num_iterations=100,
-    num_iter_test=1000,
-    batch_size_val_test=50,
+    device=None,
+    learning_rate=1e-3,
 ):
+    """Train MaSIF-site.
 
-    # Open training list.
+    Args:
+        model:          MaSIF_site instance.
+        params:         masif_opts['site'] dict with keys:
+                        model_dir, training_list, testing_list,
+                        masif_precomputation_dir, feat_mask, n_conv_layers.
+        batch_size:     max patches per gradient step.
+        num_iterations: number of full dataset passes (epochs).
+        device:         torch.device (auto-detect if None).
+        learning_rate:  Adam learning rate.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
 
-    list_training_loss = []
-    list_training_auc = []
-    list_validation_auc = []
-    iter_time = []
-    best_val_auc = 0
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     out_dir = params["model_dir"]
-    logfile = open(out_dir + "log.txt", "w")
-    for key in params:
-        logfile.write("{}: {}\n".format(key, params[key]))
+    os.makedirs(out_dir, exist_ok=True)
+    logfile = open(os.path.join(out_dir, "log.txt"), "w")
+    for key, val in params.items():
+        logfile.write(f"{key}: {val}\n")
 
-    training_list = open(params["training_list"]).readlines()
-    training_list = [x.rstrip() for x in training_list]
-
-    testing_list = open(params["testing_list"]).readlines()
-    testing_list = [x.rstrip() for x in testing_list]
+    training_list = set(
+        line.rstrip() for line in open(params["training_list"])
+    )
+    testing_list = set(
+        line.rstrip() for line in open(params["testing_list"])
+    )
 
     data_dirs = os.listdir(params["masif_precomputation_dir"])
     np.random.shuffle(data_dirs)
-    data_dirs = data_dirs
-    n_val = len(data_dirs) // 10
-    val_dirs = set(data_dirs[(len(data_dirs) - n_val) :])
+    n_val    = max(1, len(data_dirs) // 10)
+    val_dirs = set(data_dirs[-n_val:])
 
-    for num_iter in range(num_iterations):
-        # Start training epoch:
-        list_training_loss = []
-        list_training_auc = []
+    best_val_auc = 0.0
+
+    for epoch in range(num_iterations):
+        list_train_auc, list_train_loss = [], []
         list_val_auc = []
-        list_val_pos_labels = []
-        list_val_neg_labels = []
-        list_val_names = []
-        list_training_acc = []
-        list_val_acc = []
-        logfile.write("Starting epoch {}".format(num_iter))
-        print("Starting epoch {}".format(num_iter))
-        tic = time.time()
-        all_training_labels = []
-        all_training_scores = []
-        all_val_labels = []
-        all_val_scores = []
-        all_test_labels = []
-        all_test_scores = []
-        count_proteins = 0
-
         list_test_auc = []
-        list_test_names = []
-        list_test_acc = []
-        all_test_labels = []
-        all_test_scores = []
+        all_test_labels, all_test_scores = [], []
+        count = 0
+        tic = time.time()
 
+        logfile.write(f"Starting epoch {epoch}\n")
+        print(f"Starting epoch {epoch}")
+
+        # ---- Training / validation pass ----
         for ppi_pair_id in data_dirs:
-            mydir = params["masif_precomputation_dir"] + ppi_pair_id + "/"
-            pdbid = ppi_pair_id.split("_")[0]
-            chains1 = ppi_pair_id.split("_")[1]
-            if len(ppi_pair_id.split("_")) > 2:
-                chains2 = ppi_pair_id.split("_")[2]
-            else: 
-                chains2 = ''
+            mydir = os.path.join(params["masif_precomputation_dir"], ppi_pair_id, "")
+            fields = ppi_pair_id.split("_")
+            pdbid   = fields[0]
+            chain1  = fields[1]
+            chain2  = fields[2] if len(fields) > 2 else ""
+
             pids = []
-            if pdbid + "_" + chains1 in training_list:
-                pids.append("p1")
-            if pdbid + "_" + chains2 in training_list:
-                pids.append("p2")
-            for pid in pids:
+            if pdbid + "_" + chain1 in training_list or pdbid + "_" + chain1 in val_dirs:
+                pids.append(("p1", chain1))
+            if chain2 and (pdbid + "_" + chain2 in training_list or pdbid + "_" + chain2 in val_dirs):
+                pids.append(("p2", chain2))
+
+            for pid, chain in pids:
                 try:
                     iface_labels = np.load(mydir + pid + "_iface_labels.npy")
-                except:
+                except FileNotFoundError:
                     continue
+
                 if len(iface_labels) > 8000:
                     continue
-                if (
-                    np.sum(iface_labels) > 0.75 * len(iface_labels)
-                    or np.sum(iface_labels) < 30
-                ):
+                pos_sum = np.sum(iface_labels)
+                if pos_sum > 0.75 * len(iface_labels) or pos_sum < 30:
                     continue
-                count_proteins += 1
 
-                rho_wrt_center = np.load(mydir + pid + "_rho_wrt_center.npy")
-                theta_wrt_center = np.load(mydir + pid + "_theta_wrt_center.npy")
-                input_feat = np.load(mydir + pid + "_input_feat.npy")
+                count += 1
+                rho   = np.load(mydir + pid + "_rho_wrt_center.npy")
+                theta = np.load(mydir + pid + "_theta_wrt_center.npy")
+                feat  = np.load(mydir + pid + "_input_feat.npy")
                 if np.sum(params["feat_mask"]) < 5:
-                    input_feat = mask_input_feat(input_feat, params["feat_mask"])
-                mask = np.load(mydir + pid + "_mask.npy")
-                mask = np.expand_dims(mask, 2)
-                indices = np.load(mydir + pid + "_list_indices.npy", encoding="latin1")
-                # indices is (n_verts x <30), it should be
-                indices = pad_indices(indices, mask.shape[1])
-                tmp = np.zeros((len(iface_labels), 2))
-                for i in range(len(iface_labels)):
-                    if iface_labels[i] == 1:
-                        tmp[i, 0] = 1
-                    else:
-                        tmp[i, 1] = 1
-                iface_labels_dc = tmp
-                logfile.flush()
-                pos_labels = np.where(iface_labels == 1)[0]
-                neg_labels = np.where(iface_labels == 0)[0]
-                np.random.shuffle(neg_labels)
-                np.random.shuffle(pos_labels)
-                # Scramble neg idx, and only get as many as pos_labels to balance the training.
+                    feat = mask_input_feat(feat, params["feat_mask"])
+                mask_arr = np.load(mydir + pid + "_mask.npy")
+                indices  = np.load(mydir + pid + "_list_indices.npy",
+                                   encoding="latin1", allow_pickle=True)
+
+                mask_3d  = mask_arr[:, :, np.newaxis]
+                indices  = pad_indices(indices, mask_arr.shape[1])
+
+                # One-hot labels
+                labels_2d = np.zeros((len(iface_labels), 2))
+                labels_2d[iface_labels == 1, 0] = 1
+                labels_2d[iface_labels == 0, 1] = 1
+
+                pos_idx_np = np.where(iface_labels == 1)[0]
+                neg_idx_np = np.where(iface_labels == 0)[0]
+                np.random.shuffle(neg_idx_np)
+                np.random.shuffle(pos_idx_np)
+
                 if params["n_conv_layers"] == 1:
-                    n = min(len(pos_labels), len(neg_labels))
-                    n = min(n, batch_size // 2)
-                    subset = np.concatenate([neg_labels[:n], pos_labels[:n]])
-
-                    rho_wrt_center = rho_wrt_center[subset]
-                    theta_wrt_center = theta_wrt_center[subset]
-                    input_feat = input_feat[subset]
-                    mask = mask[subset]
-                    iface_labels_dc = iface_labels_dc[subset]
-                    indices = indices[subset]
-                    pos_labels = range(0, n)
-                    neg_labels = range(n, n * 2)
+                    n = min(len(pos_idx_np), len(neg_idx_np), batch_size // 2)
+                    subset = np.concatenate([neg_idx_np[:n], pos_idx_np[:n]])
+                    rho   = rho[subset];   theta = theta[subset]
+                    feat  = feat[subset];  mask_3d = mask_3d[subset]
+                    labels_2d = labels_2d[subset]
+                    indices   = indices[subset]
+                    pos_idx_np = np.arange(n)
+                    neg_idx_np = np.arange(n, 2 * n)
                 else:
-                    n = min(len(pos_labels), len(neg_labels))
-                    neg_labels = neg_labels[:n]
-                    pos_labels = pos_labels[:n]
+                    neg_idx_np = neg_idx_np[:len(pos_idx_np)]
 
-                feed_dict = {
-                    learning_obj.rho_coords: rho_wrt_center,
-                    learning_obj.theta_coords: theta_wrt_center,
-                    learning_obj.input_feat: input_feat,
-                    learning_obj.mask: mask,
-                    learning_obj.labels: iface_labels_dc,
-                    learning_obj.pos_idx: pos_labels,
-                    learning_obj.neg_idx: neg_labels,
-                    learning_obj.indices_tensor: indices,
-                }
+                # Tensors
+                rho_t    = _to_tensor(rho[:, :, np.newaxis], device)
+                theta_t  = _to_tensor(theta[:, :, np.newaxis], device)
+                feat_t   = _to_tensor(feat, device)
+                mask_t   = _to_tensor(mask_3d, device)
+                idx_t    = _to_tensor(indices, device, dtype=torch.long)
+                labels_t = _to_tensor(labels_2d, device)
+                pos_t    = _to_tensor(pos_idx_np, device, dtype=torch.long)
+                neg_t    = _to_tensor(neg_idx_np, device, dtype=torch.long)
 
-                if ppi_pair_id in val_dirs:
-                    logfile.write("Validating on {} {}\n".format(ppi_pair_id, pid))
-                    feed_dict[learning_obj.keep_prob] = 1.0
-                    training_loss, score, eval_labels = learning_obj.session.run(
-                        [
-                            learning_obj.data_loss,
-                            learning_obj.eval_score,
-                            learning_obj.eval_labels,
-                        ],
-                        feed_dict=feed_dict,
-                    )
-                    auc = metrics.roc_auc_score(eval_labels[:, 0], score)
-                    list_val_pos_labels.append(np.sum(iface_labels))
-                    list_val_neg_labels.append(len(iface_labels) - np.sum(iface_labels))
+                is_val = ppi_pair_id in val_dirs
+
+                if is_val:
+                    logfile.write(f"Validating on {ppi_pair_id} {pid}\n")
+                    model.eval()
+                    with torch.no_grad():
+                        logits = model(feat_t, rho_t, theta_t, mask_t, idx_t)
+                        loss, scores, el = model.compute_loss(logits, labels_t, pos_t, neg_t)
+                    auc = metrics.roc_auc_score(el[:, 0].detach().cpu().numpy(), scores.detach().cpu().numpy())
                     list_val_auc.append(auc)
-                    list_val_names.append(ppi_pair_id)
-                    all_val_labels = np.concatenate([all_val_labels, eval_labels[:, 0]])
-                    all_val_scores = np.concatenate([all_val_scores, score])
                 else:
-                    logfile.write("Training on {} {}\n".format(ppi_pair_id, pid))
-                    feed_dict[learning_obj.keep_prob] = 1.0
-                    _, training_loss, norm_grad, score, eval_labels = learning_obj.session.run(
-                        [
-                            learning_obj.optimizer,
-                            learning_obj.data_loss,
-                            learning_obj.norm_grad,
-                            learning_obj.eval_score,
-                            learning_obj.eval_labels,
-                        ],
-                        feed_dict=feed_dict,
-                    )
-                    all_training_labels = np.concatenate(
-                        [all_training_labels, eval_labels[:, 0]]
-                    )
-                    all_training_scores = np.concatenate([all_training_scores, score])
-                    auc = metrics.roc_auc_score(eval_labels[:, 0], score)
-                    list_training_auc.append(auc)
-                    list_training_loss.append(np.mean(training_loss))
+                    logfile.write(f"Training on {ppi_pair_id} {pid}\n")
+                    model.train()
+                    optimizer.zero_grad()
+                    logits = model(feat_t, rho_t, theta_t, mask_t, idx_t)
+                    loss, scores, el = model.compute_loss(logits, labels_t, pos_t, neg_t)
+                    loss.backward()
+                    optimizer.step()
+                    auc = metrics.roc_auc_score(el[:, 0].detach().cpu().numpy(), scores.detach().cpu().numpy())
+                    list_train_auc.append(auc)
+                    list_train_loss.append(loss.item())
+
                 logfile.flush()
 
-        # Run testing cycle.
+        # ---- Test pass ----
         for ppi_pair_id in data_dirs:
-            mydir = params["masif_precomputation_dir"] + ppi_pair_id + "/"
-            pdbid = ppi_pair_id.split("_")[0]
-            chains1 = ppi_pair_id.split("_")[1]
-            if len(ppi_pair_id.split("_")) > 2:
-                chains2 = ppi_pair_id.split("_")[2]
-            else: 
-                chains2 = ''
+            mydir = os.path.join(params["masif_precomputation_dir"], ppi_pair_id, "")
+            fields = ppi_pair_id.split("_")
+            pdbid  = fields[0]
+            chain1 = fields[1]
+            chain2 = fields[2] if len(fields) > 2 else ""
+
             pids = []
-            if pdbid + "_" + chains1 in testing_list:
-                pids.append("p1")
-            if pdbid + "_" + chains2 in testing_list:
-                pids.append("p2")
-            for pid in pids:
-                logfile.write("Testing on {} {}\n".format(ppi_pair_id, pid))
+            if pdbid + "_" + chain1 in testing_list:
+                pids.append(("p1", chain1))
+            if chain2 and pdbid + "_" + chain2 in testing_list:
+                pids.append(("p2", chain2))
+
+            for pid, _ in pids:
                 try:
                     iface_labels = np.load(mydir + pid + "_iface_labels.npy")
-                except:
+                except FileNotFoundError:
                     continue
                 if len(iface_labels) > 20000:
                     continue
-                if (
-                    np.sum(iface_labels) > 0.75 * len(iface_labels)
-                    or np.sum(iface_labels) < 30
-                ):
+                pos_sum = np.sum(iface_labels)
+                if pos_sum > 0.75 * len(iface_labels) or pos_sum < 30:
                     continue
-                count_proteins += 1
 
-                rho_wrt_center = np.load(mydir + pid + "_rho_wrt_center.npy")
-                theta_wrt_center = np.load(mydir + pid + "_theta_wrt_center.npy")
-                input_feat = np.load(mydir + pid + "_input_feat.npy")
+                rho   = np.load(mydir + pid + "_rho_wrt_center.npy")
+                theta = np.load(mydir + pid + "_theta_wrt_center.npy")
+                feat  = np.load(mydir + pid + "_input_feat.npy")
                 if np.sum(params["feat_mask"]) < 5:
-                    input_feat = mask_input_feat(input_feat, params["feat_mask"])
-                mask = np.load(mydir + pid + "_mask.npy")
-                mask = np.expand_dims(mask, 2)
-                indices = np.load(mydir + pid + "_list_indices.npy", encoding="latin1")
-                # indices is (n_verts x <30), it should be
-                indices = pad_indices(indices, mask.shape[1])
-                tmp = np.zeros((len(iface_labels), 2))
-                for i in range(len(iface_labels)):
-                    if iface_labels[i] == 1:
-                        tmp[i, 0] = 1
-                    else:
-                        tmp[i, 1] = 1
-                iface_labels_dc = tmp
-                logfile.flush()
-                pos_labels = np.where(iface_labels == 1)[0]
-                neg_labels = np.where(iface_labels == 0)[0]
+                    feat = mask_input_feat(feat, params["feat_mask"])
+                mask_arr = np.load(mydir + pid + "_mask.npy")
+                indices  = np.load(mydir + pid + "_list_indices.npy",
+                                   encoding="latin1", allow_pickle=True)
+                indices = pad_indices(indices, mask_arr.shape[1])
 
-                feed_dict = {
-                    learning_obj.rho_coords: rho_wrt_center,
-                    learning_obj.theta_coords: theta_wrt_center,
-                    learning_obj.input_feat: input_feat,
-                    learning_obj.mask: mask,
-                    learning_obj.labels: iface_labels_dc,
-                    learning_obj.pos_idx: pos_labels,
-                    learning_obj.neg_idx: neg_labels,
-                    learning_obj.indices_tensor: indices,
-                }
-
-                feed_dict[learning_obj.keep_prob] = 1.0
-                score = learning_obj.session.run(
-                    [learning_obj.full_score], feed_dict=feed_dict
+                scores = run_masif_site(
+                    params, model,
+                    rho, theta, feat, mask_arr, indices,
+                    device=device,
                 )
-                score = score[0]
-                auc = metrics.roc_auc_score(iface_labels, score)
+                auc = metrics.roc_auc_score(iface_labels, scores)
                 list_test_auc.append(auc)
-                list_test_names.append((ppi_pair_id, pid))
                 all_test_labels.append(iface_labels)
-                all_test_scores.append(score)
+                all_test_scores.append(scores)
 
-        outstr = "Epoch ran on {} proteins\n".format(count_proteins)
-        outstr += "Per protein AUC mean (training): {:.4f}; median: {:.4f} for iter {}\n".format(
-            np.mean(list_training_auc), np.median(list_training_auc), num_iter
-        )
-        outstr += "Per protein AUC mean (validation): {:.4f}; median: {:.4f} for iter {}\n".format(
-            np.mean(list_val_auc), np.median(list_val_auc), num_iter
-        )
-        outstr += "Per protein AUC mean (test): {:.4f}; median: {:.4f} for iter {}\n".format(
-            np.mean(list_test_auc), np.median(list_test_auc), num_iter
-        )
-        flat_all_test_labels = np.concatenate(all_test_labels, axis=0)
-        flat_all_test_scores = np.concatenate(all_test_scores, axis=0)
-        outstr += "Testing auc (all points): {:.2f}".format(
-            metrics.roc_auc_score(flat_all_test_labels, flat_all_test_scores)
-        )
-        outstr += "Epoch took {:2f}s\n".format(time.time() - tic)
+        flat_test_labels = np.concatenate(all_test_labels) if all_test_labels else np.array([])
+        flat_test_scores = np.concatenate(all_test_scores) if all_test_scores else np.array([])
+
+        outstr = f"Epoch ran on {count} proteins\n"
+        outstr += (f"Per protein AUC mean (training): {np.mean(list_train_auc):.4f}; "
+                   f"median: {np.median(list_train_auc):.4f}\n")
+        outstr += (f"Per protein AUC mean (validation): {np.mean(list_val_auc):.4f}; "
+                   f"median: {np.median(list_val_auc):.4f}\n")
+        outstr += (f"Per protein AUC mean (test): {np.mean(list_test_auc):.4f}; "
+                   f"median: {np.median(list_test_auc):.4f}\n")
+        if len(flat_test_labels) > 0:
+            outstr += f"Testing AUC (all points): {metrics.roc_auc_score(flat_test_labels, flat_test_scores):.4f}\n"
+        outstr += f"Epoch took {time.time() - tic:.2f}s\n"
+
         logfile.write(outstr + "\n")
         print(outstr)
 
-        if np.mean(list_val_auc) > best_val_auc:
+        val_mean = np.mean(list_val_auc) if list_val_auc else 0.0
+        if val_mean > best_val_auc:
+            best_val_auc = val_mean
             logfile.write(">>> Saving model.\n")
-            print(">>> Saving model.\n")
-            best_val_auc = np.mean(list_val_auc)
-            output_model = out_dir + "model"
-            learning_obj.saver.save(learning_obj.session, output_model)
-            # Save the scores for test.
-            np.save(out_dir + "test_labels.npy", all_test_labels)
-            np.save(out_dir + "test_scores.npy", all_test_scores)
-            np.save(out_dir + "test_names.npy", list_test_names)
+            print(">>> Saving model.")
+            torch.save(model.state_dict(), os.path.join(out_dir, "model.pt"))
+            np.save(os.path.join(out_dir, "test_labels.npy"), all_test_labels)
+            np.save(os.path.join(out_dir, "test_scores.npy"), all_test_scores)
 
     logfile.close()

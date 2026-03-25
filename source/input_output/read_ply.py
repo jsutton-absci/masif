@@ -1,53 +1,52 @@
-import pymesh
-import numpy
 """
-read_ply.py: Read a ply file from disk using pymesh and load the attributes used by MaSIF. 
-Pablo Gainza - LPDI STI EPFL 2019
-Released under an Apache License 2.0
+read_ply.py: Read a PLY surface file written by MaSIF.
+
+Replaces the previous PyMesh-based implementation with plyfile, which is
+a pure-Python library with no compiled dependencies.
 """
 
-def read_ply(filename):
-    # Read a ply file from disk using pymesh and load the attributes used by MaSIF. 
-    # filename: the input ply file. 
-    # returns data as tuple.
-    mesh = pymesh.load_mesh(filename)
+import numpy as np
+from plyfile import PlyData
 
-    attributes = mesh.get_attribute_names()
-    if "vertex_nx" in attributes:
-        nx = mesh.get_attribute("vertex_nx")
-        ny = mesh.get_attribute("vertex_ny")
-        nz = mesh.get_attribute("vertex_nz")
 
-        normals = numpy.column_stack((nx, ny, nz))
+def read_ply(filename: str):
+    """Read a MaSIF PLY surface file.
+
+    Args:
+        filename: path to an ASCII or binary PLY file.
+
+    Returns:
+        Tuple (vertices, faces, normals, charge, vertex_cb, hbond, hphob)
+        where each item is a numpy array.  Missing attributes are returned
+        as zero arrays of the appropriate length.
+    """
+    plydata = PlyData.read(filename)
+    v = plydata["vertex"]
+    n = len(v)
+
+    vertices = np.stack([
+        np.array(v["x"], dtype=np.float64),
+        np.array(v["y"], dtype=np.float64),
+        np.array(v["z"], dtype=np.float64),
+    ], axis=1)
+
+    face_data = plydata["face"]["vertex_indices"]
+    faces = np.vstack([np.asarray(f, dtype=np.int32) for f in face_data])
+
+    prop_names = {p.name for p in v.properties}
+
+    if "vertex_nx" in prop_names:
+        normals = np.stack([
+            np.array(v["vertex_nx"], dtype=np.float64),
+            np.array(v["vertex_ny"], dtype=np.float64),
+            np.array(v["vertex_nz"], dtype=np.float64),
+        ], axis=1)
     else:
         normals = None
-    if "vertex_charge" in attributes:
-        charge = mesh.get_attribute("vertex_charge")
-    else:
-        charge = numpy.array([0.0] * len(mesh.vertices))
 
-    if "vertex_cb" in attributes:
-        vertex_cb = mesh.get_attribute("vertex_cb")
-    else:
-        vertex_cb = numpy.array([0.0] * len(mesh.vertices))
+    charge     = np.array(v["vertex_charge"], dtype=np.float64) if "vertex_charge" in prop_names else np.zeros(n)
+    vertex_cb  = np.array(v["vertex_cb"],     dtype=np.float64) if "vertex_cb"     in prop_names else np.zeros(n)
+    hbond      = np.array(v["vertex_hbond"],  dtype=np.float64) if "vertex_hbond"  in prop_names else np.zeros(n)
+    hphob      = np.array(v["vertex_hphob"],  dtype=np.float64) if "vertex_hphob"  in prop_names else np.zeros(n)
 
-    if "vertex_hbond" in attributes:
-        vertex_hbond = mesh.get_attribute("vertex_hbond")
-    else:
-        vertex_hbond = numpy.array([0.0] * len(mesh.vertices))
-
-    if "vertex_hphob" in attributes:
-        vertex_hphob = mesh.get_attribute("vertex_hphob")
-    else:
-        vertex_hphob = numpy.array([0.0] * len(mesh.vertices))
-
-    return (
-        mesh.vertices,
-        mesh.faces,
-        normals,
-        charge,
-        vertex_cb,
-        vertex_hbond,
-        vertex_hphob,
-    )
-
+    return vertices, faces, normals, charge, vertex_cb, hbond, hphob

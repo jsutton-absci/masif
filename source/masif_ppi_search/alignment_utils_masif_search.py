@@ -1,5 +1,4 @@
 import numpy as np 
-from IPython.core.debugger import set_trace
 import copy
 from Bio.PDB import *
 import os
@@ -42,8 +41,8 @@ def compute_nn_score(
     else:
         features_trimmed[0,:features.shape[0],:] = features
 
-    # Evaluate patch with neural network. 
-    pred = nn_model.eval(features_trimmed)
+    # Evaluate patch with neural network.
+    pred = nn_model.predict(features_trimmed)
     return pred[0][1]
 
 def rand_rotation_matrix(deflection=1.0, randnums=None):
@@ -275,8 +274,9 @@ def compute_desc_dist_score(
         source_p = corr[:, 0]
         try:
             dists_cutoff = target_desc.data[:, target_p] - source_desc.data[:, source_p]
-        except:
-            set_trace()
+        except Exception as e:
+            print(f"Descriptor index error: {e}")
+            return np.array([0.0, 0.0, 0.0, 0.0])
         dists_cutoff = np.sqrt(np.sum(np.square(dists_cutoff.T), axis=1))
         inliers = len(corr)
 

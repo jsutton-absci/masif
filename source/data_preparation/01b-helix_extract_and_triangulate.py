@@ -6,13 +6,11 @@ import shutil
 from Bio.PDB import * 
 import sys
 import importlib
-from IPython.core.debugger import set_trace
 
 # Local includes
 from default_config.masif_opts import masif_opts
 from triangulation.computeMSMS import computeMSMS
 from triangulation.fixmesh import fix_mesh
-import pymesh
 from input_output.extractHelix import extractHelix
 from input_output.save_ply import save_ply
 from input_output.read_ply import read_ply
@@ -30,7 +28,9 @@ def computeHelices(pdbid, pdbfilename, chain_id):
     structure = p.get_structure(pdbid, pdbfilename)
     model = structure[0]
     # Compute secondary structure of all residues using DSSP
-    dssp = DSSP(model, pdbfilename)
+    # BioPython 1.80+ supports both 'dssp' and 'mkdssp' binary names
+    _dssp_exec = 'mkdssp' if shutil.which('mkdssp') else 'dssp'
+    dssp = DSSP(model, pdbfilename, dssp=_dssp_exec)
     chain_helices = []
     cur_helix = []
     chain = model[chain_id]
@@ -98,29 +98,28 @@ for chain_id in list(chain_ids1):
         faces2 = faces1
 
         # Fix the mesh.
-        mesh = pymesh.form_mesh(vertices2, faces2)
-        regular_mesh = fix_mesh(mesh, masif_opts['mesh_res'])
+        reg_vertices, reg_faces = fix_mesh(vertices2, faces2, masif_opts['mesh_res'])
 
         # Compute the normals
-        vertex_normal = compute_normal(regular_mesh.vertices, regular_mesh.faces)
+        vertex_normal = compute_normal(reg_vertices, reg_faces)
         # Assign charges on new vertices based on charges of old vertices (nearest
         # neighbor)
 
         if masif_opts['use_hbond']:
-            vertex_hbond = assignChargesToNewMesh(regular_mesh.vertices, vertices1,\
+            vertex_hbond = assignChargesToNewMesh(reg_vertices, vertices1,\
                 vertex_hbond, masif_opts)
 
         if masif_opts['use_hphob']:
-            vertex_hphobicity = assignChargesToNewMesh(regular_mesh.vertices, vertices1,\
+            vertex_hphobicity = assignChargesToNewMesh(reg_vertices, vertices1,\
                 vertex_hphobicity, masif_opts)
 
         if masif_opts['use_apbs']:
-            vertex_charges = computeAPBS(regular_mesh.vertices, out_filename1+".pdb", out_filename1)
+            vertex_charges = computeAPBS(reg_vertices, out_filename1+".pdb", out_filename1)
 
-        iface = np.zeros(len(regular_mesh.vertices))
+        iface = np.zeros(len(reg_vertices))
         # Convert to ply and save.
-        save_ply(out_filename1+".ply", regular_mesh.vertices,\
-                                regular_mesh.faces, normals=vertex_normal, charges=vertex_charges,\
+        save_ply(out_filename1+".ply", reg_vertices,\
+                                reg_faces, normals=vertex_normal, charges=vertex_charges,\
                                 normalize_charges=True, hbond=vertex_hbond, hphob=vertex_hphobicity, iface=iface)
         if not os.path.exists(masif_opts['ply_chain_dir']):
             os.makedirs(masif_opts['ply_chain_dir'])

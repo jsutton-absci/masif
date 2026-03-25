@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
-import pymesh
-from IPython.core.debugger import set_trace
+from plyfile import PlyData
 import time
 import os
 from default_config.masif_opts import masif_opts
@@ -66,8 +65,8 @@ def get_patch_geo(
     idx = patch_coords[center]
     try:
         pts = np.asarray(pcd.points)[idx, :]
-    except:
-        set_trace()
+    except Exception as e:
+        raise IndexError(f"PCD index out of bounds for center {center}: {e}")
     nrmls = np.asarray(pcd.normals)[idx, :]
     # Expand the surface in the direction of the normals. 
     pts = pts + outward_shift * nrmls
@@ -123,9 +122,8 @@ target_ppi_pair_id = "4ZQK_A_B"
 # Go through every 12A patch in top_dir -- get the one with the highest iface mean 12A around it.
 target_ply_fn = os.path.join(ply_iface_dir, target_name + ".ply")
 
-mesh = pymesh.load_mesh(target_ply_fn)
-
-iface = mesh.get_attribute("vertex_iface")
+_plydata = PlyData.read(target_ply_fn)
+iface = np.array(_plydata['vertex']['vertex_iface'])
 
 target_coord = subsample_patch_coords(precomp_dir, target_ppi_pair_id, "p1")
 target_vix = get_target_vix(target_coord, iface)
@@ -170,7 +168,7 @@ def match_descriptors(
                     pdb_chain_id = fields[0] + "_" + fields[2]
                 iface = np.load(in_iface_dir + "/pred_" + pdb_chain_id + ".npy")[0]
                 descs = np.load(mydescdir + "/" + pid + "_desc_straight.npy")
-            except:
+            except (FileNotFoundError, IOError):
                 continue
             print(pdb_chain_id)
             name = (ppi_pair_id, pid)
@@ -366,8 +364,9 @@ def compute_desc_dist_score(
         source_p = corr[:, 0]
         try:
             dists_cutoff = target_desc.data[:, target_p] - source_desc.data[:, source_p]
-        except:
-            set_trace()
+        except Exception as e:
+            print(f"Descriptor index error: {e}")
+            continue
         dists_cutoff = np.sqrt(np.sum(np.square(dists_cutoff.T), axis=1))
         inliers = len(corr)
 

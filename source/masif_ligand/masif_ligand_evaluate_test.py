@@ -1,108 +1,68 @@
 import os
 import numpy as np
-from IPython.core.debugger import set_trace
-import importlib
-import sys
+import torch
 from default_config.masif_opts import masif_opts
 from masif_modules.MaSIF_ligand import MaSIF_ligand
-from masif_modules.read_ligand_tfrecords import _parse_function
+from masif_modules.read_ligand_tfrecords import LigandDataset
 from sklearn.metrics import confusion_matrix
-import tensorflow as tf
 
 """
-masif_ligand_evaluate_test: Evaluate and test MaSIF-ligand.
-Freyr Sverrisson - LPDI STI EPFL 2019
+masif_ligand_evaluate_test.py: Evaluate and test MaSIF-ligand.
+Freyr Sverrisson - LPDI STI EPFL 2019 (PyTorch port 2024)
 Released under an Apache License 2.0
 """
 
 params = masif_opts["ligand"]
-# Load testing data
-testing_data = tf.data.TFRecordDataset(
-    os.path.join(params["tfrecords_dir"], "testing_data_sequenceSplit_30.tfrecord")
-)
-testing_data = testing_data.map(_parse_function)
+precom_dir = params["masif_precomputation_dir"]
+
+test_pdbs = np.load("lists/test_pdbs_sequence.npy").astype(str)
+testing_data = LigandDataset(test_pdbs, precom_dir)
 
 model_dir = params["model_dir"]
-output_model = model_dir + "model"
+output_model = os.path.join(model_dir, "model.pt")
 
 test_set_out_dir = params["test_set_out_dir"]
-if not os.path.exists(test_set_out_dir):
-    os.makedirs(test_set_out_dir)
+os.makedirs(test_set_out_dir, exist_ok=True)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with tf.Session() as sess:
-    # Build network
-    learning_obj = MaSIF_ligand(
-        sess,
-        params["max_distance"],
-        params["n_classes"],
-        idx_gpu="/gpu:0",
-        feat_mask=params["feat_mask"],
-        costfun=params["costfun"],
-    )
-    # Load pretrained network
-    learning_obj.saver.restore(learning_obj.session, output_model)
+model = MaSIF_ligand(
+    n_ligands=params["n_classes"],
+    max_rho=params["max_distance"],
+    feat_mask=params["feat_mask"],
+)
+model.load_state_dict(torch.load(output_model, map_location=device, weights_only=True))
+model.to(device)
+model.eval()
 
-    num_test_samples = 290
-    testing_iterator = testing_data.make_one_shot_iterator()
-    testing_next_element = testing_iterator.get_next()
+n_samples_per_pocket = 100
 
-    all_logits_softmax = []
-    all_labels = []
-    all_pdbs = []
-    all_data_loss = []
-    for num_test_sample in range(num_test_samples):
-        try:
-            data_element = sess.run(testing_next_element)
-        except:
+for data_element in testing_data:
+    input_feat, rho, theta, mask, labels, pdb = data_element
+    n_ligands = labels.shape[1]
+
+    pdb_logits_softmax = []
+    pdb_labels = []
+
+    for ligand in range(n_ligands):
+        pocket_points = np.where(labels[:, ligand] != 0)[0]
+        label = int(np.max(labels[:, ligand])) - 1
+        if pocket_points.shape[0] < 32:
             continue
+        pdb_labels.append(label)
 
-        print(num_test_sample)
+        samples_logits = []
+        for _ in range(n_samples_per_pocket):
+            sample = np.random.choice(pocket_points, 32, replace=False)
+            feat_t  = torch.tensor(input_feat[sample], dtype=torch.float32).to(device)
+            rho_t   = torch.tensor(np.expand_dims(rho, -1)[sample], dtype=torch.float32).to(device)
+            theta_t = torch.tensor(np.expand_dims(theta, -1)[sample], dtype=torch.float32).to(device)
+            mask_t  = torch.tensor(mask[sample], dtype=torch.float32).to(device)
+            with torch.no_grad():
+                logits = torch.softmax(model(feat_t, rho_t, theta_t, mask_t), dim=1)
+            samples_logits.append(logits.cpu().numpy())
+        pdb_logits_softmax.append(samples_logits)
 
-        labels = data_element[4]
-        n_ligands = labels.shape[1]
-        pdb_logits_softmax = []
-        pdb_labels = []
-        for ligand in range(n_ligands):
-            # Rows indicate point number and columns ligand type
-            pocket_points = np.where(labels[:, ligand] != 0.0)[0]
-            label = np.max(labels[:, ligand]) - 1
-            pocket_labels = np.zeros(7, dtype=np.float32)
-            pocket_labels[label] = 1.0
-            npoints = pocket_points.shape[0]
-            if npoints < 32:
-                continue
-            pdb_labels.append(label)
-            pdb = data_element[5]
-            # all_pdbs.append(pdb)
-
-            samples_logits_softmax = []
-            samples_data_loss = []
-            # Make 100 predictions
-            for i in range(100):
-                # Sample pocket randomly
-                sample = np.random.choice(pocket_points, 32, replace=False)
-                feed_dict = {
-                    learning_obj.input_feat: data_element[0][sample, :, :],
-                    learning_obj.rho_coords: np.expand_dims(data_element[1], -1)[
-                        sample, :, :
-                    ],
-                    learning_obj.theta_coords: np.expand_dims(data_element[2], -1)[
-                        sample, :, :
-                    ],
-                    learning_obj.mask: data_element[3][sample, :, :],
-                    learning_obj.labels: pocket_labels,
-                    learning_obj.keep_prob: 1.0,
-                }
-
-                logits_softmax, data_loss = learning_obj.session.run(
-                    [learning_obj.logits_softmax, learning_obj.data_loss],
-                    feed_dict=feed_dict,
-                )
-                samples_logits_softmax.append(logits_softmax)
-                samples_data_loss.append(data_loss)
-
-            pdb_logits_softmax.append(samples_logits_softmax)
-        np.save(test_set_out_dir + "{}_labels.npy".format(pdb), pdb_labels)
-        np.save(test_set_out_dir + "{}_logits.npy".format(pdb), pdb_logits_softmax)
-
+    np.save(os.path.join(test_set_out_dir, f"{pdb}_labels.npy"), pdb_labels)
+    np.save(os.path.join(test_set_out_dir, f"{pdb}_logits.npy"), pdb_logits_softmax)
+    print(f"Saved results for {pdb}")

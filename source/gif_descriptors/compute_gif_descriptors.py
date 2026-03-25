@@ -1,6 +1,5 @@
 import os
 import numpy as np
-from IPython.core.debugger import set_trace
 from default_config.masif_opts import masif_opts
 import sys
 
@@ -23,8 +22,8 @@ def compute_dfss_histogram(rho, ddc, mask):
             continue
         if kij[j] < -0.7 or kij[j] > 0.7:
             continue
-        radial_bin = np.int((D[j] - 1) // 2)
-        curv_bin = np.int(np.floor(10 * (kij[j] + 0.7)))
+        radial_bin = int((D[j] - 1) // 2)
+        curv_bin = int(np.floor(10 * (kij[j] + 0.7)))
         histogram[radial_bin][curv_bin] += 1
 
     # Reshape the histogram to 1 dimension:
@@ -54,7 +53,7 @@ for ppi_pair_id in list_file:
             feat = np.load(mydir + "/" + pid + "_input_feat.npy")[:, :, 1]
             mask = np.load(mydir + "/" + pid + "_mask.npy")
             rho = np.load(mydir + "/" + pid + "_rho_wrt_center.npy")
-        except:
+        except (FileNotFoundError, IOError):
             print("Error opening {}".format(ppi_pair_id))
             continue
         myoutdir = os.path.join(out_dir, ppi_pair_id)

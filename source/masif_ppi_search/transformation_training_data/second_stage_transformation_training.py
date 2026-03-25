@@ -1,18 +1,15 @@
 #!/usr/bin/env python
-from IPython.core.debugger import set_trace
 #from transformation_training_data.second_stage_transformation_training_helper import * 
 from second_stage_transformation_training_helper import * 
 # coding: utf-8
 import sys
-from open3d import *
-#import ipdb
+from geometry.open3d_import import *
 import numpy as np
 import os
 from Bio.PDB import *
 import copy
 import scipy.sparse as spio
 from default_config.masif_opts import masif_opts
-import sys
 from scipy.spatial import cKDTree
 
 """
@@ -81,7 +78,7 @@ for target_ix,target_pdb in enumerate(rand_list):
     # Load target descriptors for global matching. 
     try:
         target_desc = np.load(os.path.join(desc_dir,target_pdb,'p1_desc_flipped.npy'))
-    except:
+    except (FileNotFoundError, IOError):
         print('Error opening {}'.format(os.path.join(desc_dir,target_pdb,'p1_desc_flipped.npy')))
         continue
 

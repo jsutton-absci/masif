@@ -122,7 +122,7 @@ def load_ply(
     try:
         charge = mesh.get_attribute("vertex_charge")
         color_array = charge_color(charge)
-    except:
+    except Exception:
         print("Could not load vertex charges.")
         color_array = [colorDict["green"]] * len(verts)
     if "vertex_nx" in mesh.get_attribute_names():
@@ -414,16 +414,19 @@ def load_ply(
 
 # Load the sillouete of an iface.
 def load_giface(filename, color="white", name="giface", dotSize=0.2, lineSize=1.0):
-    mesh = pymesh.load_mesh(filename)
-    if "vertex_iface" not in mesh.get_attribute_names():
+    from plyfile import PlyData
+    plydata = PlyData.read(filename)
+    vertex_props = {prop.name for prop in plydata['vertex'].properties}
+    if "vertex_iface" not in vertex_props:
         return
-    iface = mesh.get_attribute("vertex_iface")
+    iface = np.array(plydata['vertex']['vertex_iface'])
     # Color an edge only if:
     # iface > 0 for its two edges
     # iface is zero for at least one of its edges.
     # Go through each face.
-    faces = mesh.faces
-    verts = mesh.vertices
+    face_data = plydata['face']['vertex_indices']
+    faces = np.array([list(f) for f in face_data])
+    verts = np.column_stack([plydata['vertex']['x'], plydata['vertex']['y'], plydata['vertex']['z']])
     obj = []
     visited = set()
     colorToAdd = colorDict["green"]

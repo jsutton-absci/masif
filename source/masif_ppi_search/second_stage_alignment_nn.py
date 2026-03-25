@@ -36,7 +36,7 @@ Released under an Apache License 2.0
 # Start measuring the cpu clock time here. 
 # We will not count the time required to align the structures and verify the ground truth. 
 #               This time will be subtracted at the end.
-global_start_time = time.clock()
+global_start_time = time.perf_counter()
 global_ground_truth_time = 0.0
 
 # Read the pre-trained neural network.
@@ -138,7 +138,7 @@ all_rankings_desc = []
 # Now go through each target (p1 in every case) and dock each 'decoy' binder to it. 
 # The target will have flipped (inverted) descriptors.
 for target_ix, target_pdb in enumerate(rand_list):
-    cycle_start_time = time.clock()
+    cycle_start_time = time.perf_counter()
     print('Docking all binders on target: {} '.format(target_pdb))
     target_pdb_id = target_pdb.split("_")[0]
     chains = target_pdb.split("_")[1:]
@@ -264,7 +264,7 @@ for target_ix, target_pdb in enumerate(rand_list):
         num_negs = num_negs
 
         # If this is the source_pdb, get the ground truth. The ground truth evaluation time is ignored for this and all other methods. 
-        gt_start_time = time.clock()
+        gt_start_time = time.perf_counter()
         if source_pdb == target_pdb:
 
             for j, res in enumerate(all_results):
@@ -303,19 +303,19 @@ for target_ix, target_pdb in enumerate(rand_list):
         print('ROC AUC (protein): {:.3f}'.format(auc))
     else:
         print("N/D")
-    gt_end_time = time.clock()
+    gt_end_time = time.perf_counter()
     global_ground_truth_time += (gt_end_time - gt_start_time)
 
     all_positive_rmsd.append(pos_rmsd)
     all_positive_scores.append(pos_scores)
     all_negative_scores.append(neg_scores)
-    cycle_end_time = time.clock()
+    cycle_end_time = time.perf_counter()
     cycle_time = cycle_end_time-cycle_start_time - (gt_end_time - gt_start_time)
     print("Cycle took {:.2f} cpu seconds (excluding ground truth time) ".format(cycle_time))
     # Go through every top descriptor.
 
 # We stop measuring the time at this point. 
-global_end_time = time.clock()
+global_end_time = time.perf_counter()
 
 # CPU time in minutes.
 global_cpu_time = global_end_time - global_start_time - global_ground_truth_time

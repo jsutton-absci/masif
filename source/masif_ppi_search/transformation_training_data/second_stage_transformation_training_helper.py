@@ -1,9 +1,7 @@
 #!/usr/bin/env python
-from IPython.core.debugger import set_trace
 # coding: utf-8
 import sys
-from open3d import *
-#import ipdb
+from geometry.open3d_import import *
 import numpy as np
 import os
 from sklearn.manifold import TSNE
@@ -11,7 +9,6 @@ from Bio.PDB import *
 import copy
 import scipy.sparse as spio
 from default_config.masif_opts import masif_opts
-import sys
 from scipy.spatial import cKDTree
 
 """
@@ -94,8 +91,9 @@ def multidock(source_pcd,source_patch_coords,source_descs,cand_pts,target_pcd,ta
         try:
             source_patch, source_patch_descs= \
             get_patch_geo(source_pcd,source_patch_coords,pt,source_descs)
-        except:
-            set_trace()
+        except Exception as e:
+            print(f"get_patch_geo failed for point {pt}: {e}")
+            continue
         result = registration_ransac_based_on_feature_matching(
             source_patch, target_pcd, source_patch_descs, target_descs,
             ransac_radius,

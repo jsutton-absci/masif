@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
-import pymesh
-from IPython.core.debugger import set_trace
+from plyfile import PlyData
+import numpy as np
 from scipy.spatial import cKDTree
 import time
 import os
@@ -96,9 +96,8 @@ precomp_dir = os.path.join(
 # Go through every 9A patch in top_dir -- get the one with the highest iface mean 12A around it.
 target_ply_fn = os.path.join(ply_iface_dir, target_name + ".ply")
 
-mesh = pymesh.load_mesh(target_ply_fn)
-
-iface = mesh.get_attribute("vertex_iface")
+_plydata = PlyData.read(target_ply_fn)
+iface = np.array(_plydata['vertex']['vertex_iface'])
 
 target_coord = subsample_patch_coords(target_ppi_pair_id, "p1", precomp_dir)
 target_vix = get_target_vix(target_coord, iface)
@@ -139,7 +138,7 @@ def match_descriptors(
                     pdb_chain_id = fields[0] + "_" + fields[2]
                 iface = np.load(in_iface_dir + "/pred_" + pdb_chain_id + ".npy")[0]
                 descs = np.load(mydescdir + "/" + pid + "_desc_straight.npy")
-            except:
+            except (FileNotFoundError, IOError):
                 continue
             print(pdb_chain_id)
             name = (ppi_pair_id, pid)
